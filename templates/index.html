@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🤖 AlphaZero 黑白棋</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Microsoft YaHei', Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 20px; }
+        .container { background: white; border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); padding: 30px; max-width: 900px; width: 100%; }
+        h1 { text-align: center; color: #333; margin-bottom: 20px; font-size: 2em; }
+        .info-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 15px; background: #f5f5f5; border-radius: 10px; }
+        .status { font-size: 1.2em; font-weight: bold; color: #667eea; }
+        .score-display { display: flex; gap: 20px; font-size: 1.1em; font-weight: bold; }
+        .black-score { color: #000; } .white-score { color: #666; }
+        .controls { display: flex; gap: 10px; }
+        button { background: #667eea; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 1em; transition: all 0.3s; }
+        button:hover { background: #5568d3; transform: translateY(-2px); box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4); }
+        button:disabled { background: #ccc; cursor: not-allowed; transform: none; box-shadow: none; }
+        .board-container { display: flex; justify-content: center; margin: 20px 0; }
+        #board { display: inline-block; background: #006633; padding: 10px; border-radius: 10px; box-shadow: inset 0 0 10px rgba(0,0,0,0.2); }
+        table { border-collapse: collapse; }
+        td { width: 50px; height: 50px; border: 1px solid #004d26; position: relative; cursor: pointer; transition: background 0.2s; }
+        td:hover { background: rgba(255, 255, 255, 0.1); }
+        td.legal-move { background: rgba(255, 255, 255, 0.2); border-radius: 50%; }
+        .cell { width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; }
+        .stone { width: 40px; height: 40px; border-radius: 50%; box-shadow: 2px 2px 4px rgba(0,0,0,0.3); animation: placeStone 0.3s ease-out; }
+        @keyframes placeStone { 0% { transform: scale(0); } 50% { transform: scale(1.2); } 100% { transform: scale(1); } }
+        .stone.black { background: radial-gradient(circle at 30% 30%, #666, #000); }
+        .stone.white { background: radial-gradient(circle at 30% 30%, #fff, #ddd); }
+        .last-move-indicator { position: absolute; width: 8px; height: 8px; background: red; border-radius: 50%; top: 50%; left: 50%; transform: translate(-50%, -50%); }
+        .loading { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: none; justify-content: center; align-items: center; z-index: 1000; }
+        .loading.show { display: flex; }
+        .spinner { width: 50px; height: 50px; border: 5px solid #f3f3f3; border-top: 5px solid #667eea; border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .loading-text { color: white; font-size: 1.5em; margin-left: 20px; }
+        .settings { margin-bottom: 20px; text-align: center; }
+        .settings label { margin: 0 10px; font-size: 1.1em; }
+        #model-info { text-align: center; color: #999; font-size: 0.85em; margin-top: 25px; }
+        .status-ready { color: #28a745; font-weight: bold; }
+        .status-loading { color: #fd7e14; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 AlphaZero 黑白棋</h1>
+        <div class="settings" id="settings">
+            <label><input type="radio" name="player_color" value="1" checked> 我先手 (执黑)</label>
+            <label><input type="radio" name="player_color" value="-1"> AI先手 (我执白)</label>
+        </div>
+        <div class="info-bar">
+            <div class="score-display">
+                <span class="black-score">● 黑棋: <span id="black-count">2</span></span>
+                <span class="white-score">○ 白棋: <span id="white-count">2</span></span>
+            </div>
+            <div class="status" id="status">选择先后手，点击"开始游戏"</div>
+            <div class="controls">
+                <button id="undoBtn" onclick="undoMove()" disabled>⏪ 悔棋</button>
+                <button id="newGameBtn" onclick="newGame()">🚀 开始游戏</button>
+            </div>
+        </div>
+        <div class="board-container"><div id="board"></div></div>
+        <p id="model-info">当前AI模型 (更新于: {{ model_time }})</p>
+    </div>
+    <div class="loading" id="loading"><div class="spinner"></div><div class="loading-text">AI思考中...</div></div>
+
+    <script>
+        const BOARD_SIZE = 8;
+        let gameActive = false;
+        let currentPlayer = 1; // 1 for black, -1 for white
+        let playerColor = 1;
+        let boardState = [];
+        let moveHistory = [];
+        let lastMove = null;
+
+        const undoBtn = document.getElementById('undoBtn');
+        const newGameBtn = document.getElementById('newGameBtn');
+        const settingsDiv = document.getElementById('settings');
+
+        // =================================================================
+        // 游戏核心逻辑 (前端全权负责)
+        // =================================================================
+        function initBoardState() {
+            boardState = Array(BOARD_SIZE).fill(null).map(() => Array(BOARD_SIZE).fill(0));
+            const center = BOARD_SIZE / 2;
+            boardState[center - 1][center - 1] = -1; // White
+            boardState[center - 1][center] = 1;     // Black
+            boardState[center][center - 1] = 1;     // Black
+            boardState[center][center] = -1;       // White
+        }
+
+        function getFlips(row, col, player) {
+            const flips = [];
+            const directions = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]];
+            if (boardState[row][col] !== 0) return flips;
+
+            for (const [dr, dc] of directions) {
+                const line = [];
+                let r = row + dr;
+                let c = col + dc;
+                while (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
+                    if (boardState[r][c] === -player) {
+                        line.push({r, c});
+                    } else if (boardState[r][c] === player) {
+                        flips.push(...line);
+                        break;
+                    } else { // 遇到 0
+                        break;
+                    }
+                    r += dr;
+                    c += dc;
+                }
+            }
+            return flips;
+        }
+
+        function getLegalMoves(player) {
+            const moves = [];
+            for (let i = 0; i < BOARD_SIZE; i++) {
+                for (let j = 0; j < BOARD_SIZE; j++) {
+                    if (getFlips(i, j, player).length > 0) {
+                        moves.push({ row: i, col: j });
+                    }
+                }
+            }
+            return moves;
+        }
+        
+        function isGameOver() {
+            return getLegalMoves(1).length === 0 && getLegalMoves(-1).length === 0;
+        }
+
+        // =================================================================
+        // 游戏流程与控制
+        // =================================================================
+        function newGame() {
+            gameActive = true;
+            playerColor = parseInt(document.querySelector('input[name="player_color"]:checked').value, 10);
+            currentPlayer = 1; // 黑棋总是先手
+            moveHistory = [];
+            lastMove = null;
+            
+            initBoardState();
+            updateUI();
+            
+            settingsDiv.querySelectorAll('input').forEach(input => input.disabled = true);
+            
+            nextTurn();
+        }
+
+        async function nextTurn() {
+            if (isGameOver()) {
+                handleGameOver();
+                return;
+            }
+
+            // 在回合开始时就更新一次UI，确保按钮状态等是正确的
+            updateUI();
+
+            const legalMoves = getLegalMoves(currentPlayer);
+
+            if (legalMoves.length === 0) {
+                const message = (currentPlayer === playerColor) ? "你无棋可走，回合跳过" : "AI无棋可走，回合跳过";
+                updateStatus(message);
+                await new Promise(resolve => setTimeout(resolve, 1200));
+                
+                currentPlayer *= -1; // 切换玩家
+                nextTurn(); // 递归调用，检查下一位玩家
+                return;
+            }
+            
+            if (currentPlayer === playerColor) {
+                // 玩家回合
+                updateStatus('轮到你了');
+            } else {
+                // AI回合
+                updateStatus('AI正在思考...');
+                await aiMove();
+            }
+        }
+        
+        async function handlePlayerMove(row, col) {
+            if (!gameActive || currentPlayer !== playerColor) return;
+
+            const legalMoves = getLegalMoves(playerColor);
+            if (!legalMoves.some(m => m.row === row && m.col === col)) {
+                return;
+            }
+
+            executeMove(row, col, playerColor);
+            
+            await new Promise(resolve => setTimeout(resolve, 300));
+            
+            nextTurn();
+        }
+
+        async function aiMove() {
+            showLoading(true);
+            try {
+                const response = await fetch('/api/ai_move', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ board: boardState, player: currentPlayer })
+                });
+                const data = await response.json();
+                
+                if (data.success && data.ai_move) {
+                    const { row, col } = data.ai_move;
+                    executeMove(row, col, currentPlayer);
+                } else if (!data.success) {
+                    alert('AI 出现错误: ' + data.message);
+                }
+                
+                await new Promise(resolve => setTimeout(resolve, 300));
+                nextTurn();
+
+            } catch (error) {
+                alert('调用AI时发生网络错误: ' + error);
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        function executeMove(row, col, player) {
+            moveHistory.push({
+                board: JSON.parse(JSON.stringify(boardState)),
+                currentPlayer: currentPlayer,
+                lastMove: lastMove
+            });
+
+            const flips = getFlips(row, col, player);
+            boardState[row][col] = player;
+            flips.forEach(p => boardState[p.r][p.c] = player);
+            
+            lastMove = { row, col };
+            currentPlayer *= -1; // 在这里切换玩家
+            
+            updateUI();
+        }
+        
+        function undoMove() {
+            if (!gameActive || currentPlayer !== playerColor || moveHistory.length === 0) return;
+            
+            let lastState;
+            do {
+                lastState = moveHistory.pop();
+            } while (lastState && lastState.currentPlayer !== playerColor && moveHistory.length > 0);
+
+            if (lastState) {
+                boardState = lastState.board;
+                currentPlayer = lastState.currentPlayer;
+                lastMove = lastState.lastMove;
+                
+                // 恢复状态后，直接进入下一个回合的逻辑
+                nextTurn();
+            }
+        }
+        
+        function handleGameOver() {
+            gameActive = false;
+            const blackCount = boardState.flat().filter(c => c === 1).length;
+            const whiteCount = boardState.flat().filter(c => c === -1).length;
+            
+            let message;
+            if (blackCount > whiteCount) message = '🎉 黑棋获胜！';
+            else if (whiteCount > blackCount) message = '🎉 白棋获胜！';
+            else message = '🤝 平局！';
+            
+            updateStatus(message);
+            updateUI();
+            setTimeout(() => { alert(message); }, 300);
+        }
+
+        // =================================================================
+        // UI 更新函数
+        // =================================================================
+        function updateUI() {
+            updateBoard();
+            updateScore();
+            updateControls();
+            
+            // <<< 修复点 1：将高亮逻辑移入主UI更新函数 >>>
+            // 只有在游戏进行中且轮到玩家时才高亮
+            if (gameActive && currentPlayer === playerColor) {
+                const legalMoves = getLegalMoves(currentPlayer);
+                highlightLegalMoves(legalMoves);
+            }
+        }
+
+        function createBoard() {
+            const board = document.getElementById('board');
+            let html = '<table>';
+            for (let i = 0; i < BOARD_SIZE; i++) {
+                html += '<tr>';
+                for (let j = 0; j < BOARD_SIZE; j++) {
+                    html += `<td onclick="handlePlayerMove(${i}, ${j})"><div class="cell" id="cell-${i}-${j}"></div></td>`;
+                }
+                html += '</tr>';
+            }
+            html += '</table>';
+            board.innerHTML = html;
+        }
+
+        function updateBoard() {
+            // <<< 修复点 2：在更新棋盘前，先清除所有旧的高亮 >>>
+            document.querySelectorAll('td.legal-move').forEach(td => td.classList.remove('legal-move'));
+        
+            for (let i = 0; i < BOARD_SIZE; i++) {
+                for (let j = 0; j < BOARD_SIZE; j++) {
+                    const cell = document.getElementById(`cell-${i}-${j}`);
+                    cell.innerHTML = ''; // 先清空
+                    if (boardState[i][j] !== 0) {
+                        const stoneClass = boardState[i][j] === 1 ? 'black' : 'white';
+                        cell.innerHTML = `<div class="stone ${stoneClass}"></div>`;
+                    }
+                    if (lastMove && lastMove.row === i && lastMove.col === j) {
+                        cell.innerHTML += '<div class="last-move-indicator"></div>';
+                    }
+                }
+            }
+        }
+
+        function updateScore() {
+            let black = 0, white = 0;
+            boardState.forEach(row => row.forEach(cell => {
+                if (cell === 1) black++;
+                else if (cell === -1) white++;
+            }));
+            document.getElementById('black-count').textContent = black;
+            document.getElementById('white-count').textContent = white;
+        }
+
+        function highlightLegalMoves(moves) {
+            moves.forEach(move => {
+                const td = document.getElementById(`cell-${move.row}-${move.col}`).parentElement;
+                td.classList.add('legal-move');
+            });
+        }
+
+        function updateStatus(message) {
+            document.getElementById('status').textContent = message;
+        }
+        
+        function updateControls() {
+            undoBtn.disabled = !gameActive || currentPlayer !== playerColor || moveHistory.length === 0;
+            newGameBtn.textContent = gameActive ? '🔄 重新开始' : '🚀 开始游戏';
+            if (!gameActive) {
+                settingsDiv.querySelectorAll('input').forEach(input => input.disabled = false);
+            }
+        }
+
+        function showLoading(show) {
+            document.getElementById('loading').classList.toggle('show', show);
+        }
+
+        window.onload = function() {
+            createBoard();
+            initBoardState();
+            updateUI();
+        };
+    </script>
+</body>
+</html>
